@@ -49,6 +49,21 @@ module Geocoder::Store
           end
         }
 
+        scope :near_both, lambda{ |location, other_location, *args|
+          latitude, longitude = Geocoder::Calculations.extract_coordinates(location)
+          other_latitude, other_longitude = Geocoder::Calculations.extract_coordinates(other_location)
+          if Geocoder::Calculations.coordinates_present?(latitude, longitude) && Geocoder::Calculations.coordinates_present?(other_latitude, other_longitude)
+            options = near_both_scope_options(latitude, longitude, other_latitude, other_longitude, *args)
+            select(options[:select]).where(options[:conditions]).
+              order(options[:order])
+          else
+            # If no lat/lon given we don't want any results, but we still
+            # need distance and bearing columns so you can add, for example:
+            # .order("distance")
+            select(select_clause(nil, null_value, null_value)).where(false_condition)
+          end
+        }
+
         ##
         # Find all objects within the area of a given bounding box.
         # Bounds must be an array of locations specifying the southwest
@@ -150,6 +165,49 @@ module Geocoder::Store
         }
       end
 
+      def near_both_scope_options(latitude, longitude, other_latitude, other_longitude, radius = 20, options = {})
+        if options[:units]
+          options[:units] = options[:units].to_sym
+        end
+        latitude_attribute = options[:latitude] || geocoder_options[:latitude]
+        longitude_attribute = options[:longitude] || geocoder_options[:longitude]
+        options[:units] ||= (geocoder_options[:units] || Geocoder.config.units)
+        select_distance = options.fetch(:select_distance)  { true }
+        options[:order] = "" if !select_distance && !options.include?(:order)
+        select_bearing = options.fetch(:select_bearing) { true }
+        bearing = bearing_sql(latitude, longitude, options)
+        distance = distance_sql(latitude, longitude, options)
+        other_distance = distance_sql(other_latitude, other_longitude, options)
+        distance_column = options.fetch(:distance_column) { 'distance' }
+        other_distance_column = options.fetch(:other_distance_column) { 'other_distance' }
+        bearing_column = options.fetch(:bearing_column)  { 'bearing' }
+
+        b = Geocoder::Calculations.bounding_box([latitude, longitude], radius, options)
+        args = b + [
+          full_column_name(latitude_attribute),
+          full_column_name(longitude_attribute)
+        ]
+        bounding_box_conditions = Geocoder::Sql.within_bounding_box(*args)
+
+        if using_sqlite?
+          conditions = bounding_box_conditions
+        else
+          min_radius = options.fetch(:min_radius, 0).to_f
+          conditions = [bounding_box_conditions + " AND ((#{distance}) BETWEEN ? AND ?) OR ((#{other_distance}) BETWEEN ? AND ?)", min_radius, radius, min_radius, radius]
+        end
+        {
+          :select => select_both_clause(options[:select],
+                                   select_distance ? distance : nil,
+                                   select_bearing ? bearing : nil,
+                                   distance_column,
+                                   bearing_column,
+                                   select_distance ? other_distance : nil,
+                                   other_distance_column),
+          :conditions => add_exclude_condition(conditions, options[:exclude]),
+          :order => options.include?(:order) ? options[:order] : "#{distance_column} ASC, #{other_distance_column} ASC"
+        }
+      end
+
       ##
       # SQL for calculating distance based on the current database's
       # capabilities (trig functions?).
@@ -203,6 +261,29 @@ module Geocoder::Store
         if bearing
           clause += ", " unless clause.empty?
           clause += "#{bearing} AS #{bearing_column}"
+        end
+        clause
+      end
+
+      def select_both_clause(columns, distance = nil, bearing = nil, distance_column = 'distance', bearing_column = 'bearing', other_distance = nil, other_distance_column = 'other_distance')
+        if columns == :id_only
+          return full_column_name(primary_key)
+        elsif columns == :geo_only
+          clause = ""
+        else
+          clause = (columns || full_column_name("*"))
+        end
+        if distance
+          clause += ", " unless clause.empty?
+          clause += "#{distance} AS #{distance_column}"
+        end
+        if bearing
+          clause += ", " unless clause.empty?
+          clause += "#{bearing} AS #{bearing_column}"
+        end
+        if other_distance
+          clause += ", " unless clause.empty?
+          clause += "#{other_distance} AS #{other_distance_column}"
         end
         clause
       end

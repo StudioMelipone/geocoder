@@ -38,7 +38,7 @@ class NearTest < GeocoderTestCase
 
   def test_near_scope_options_without_sqlite_includes_radius_bogus_min_radius
     omit("Not applicable to SQLite") if ENV['DB'] == 'sqlite'
-    
+
     result = Place.send(:near_scope_options, 1.0, 2.0, 5, :min_radius => 'bogus')
 
     assert_equal(0, result[:conditions][1])
